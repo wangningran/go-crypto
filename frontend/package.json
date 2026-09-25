@@ -1,0 +1,22 @@
+{
+  "name": "go-crypto-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "naive-ui": "^2.38.1",
+    "vue": "^3.4.21",
+    "@vicons/ionicons5": "^0.12.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "typescript": "^5.4.2",
+    "vite": "^5.2.0",
+    "vue-tsc": "^2.0.7"
+  }
+}
