@@ -31,6 +31,7 @@
               <Watchlist v-if="activeMenu === 'watchlist'" />
               <MarketOverview v-else-if="activeMenu === 'market'" />
               <NewsPanel v-else-if="activeMenu === 'news'" />
+              <AlertsPanel v-else-if="activeMenu === 'alerts'" />
               <SettingsPanel v-else-if="activeMenu === 'settings'" />
             </div>
           </div>
@@ -47,6 +48,7 @@ import type { MenuOption } from 'naive-ui'
 import Watchlist from './components/Watchlist.vue'
 import MarketOverview from './components/MarketOverview.vue'
 import NewsPanel from './components/NewsPanel.vue'
+import AlertsPanel from './components/AlertsPanel.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 
 declare const window: any
@@ -62,6 +64,7 @@ const menuOptions: MenuOption[] = [
   { label: '📋 Watchlist', key: 'watchlist' },
   { label: '📊 Market', key: 'market' },
   { label: '📰 News', key: 'news' },
+  { label: '🔔 Alerts', key: 'alerts' },
   { label: '⚙️ Settings', key: 'settings' },
 ]
 

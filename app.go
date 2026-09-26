@@ -16,12 +16,13 @@ import (
 )
 
 type App struct {
-	ctx           context.Context
-	cgAPI         *data.CoinGeckoAPI
-	cron          *cron.Cron
-	cache         *freecache.Cache
-	alertLastSent map[string]time.Time
-	alertMu       sync.Mutex
+	ctx            context.Context
+	cgAPI          *data.CoinGeckoAPI
+	cron           *cron.Cron
+	refreshEntryID cron.EntryID
+	cache          *freecache.Cache
+	alertLastSent  map[string]time.Time
+	alertMu        sync.Mutex
 }
 
 func NewApp() *App {
@@ -37,12 +38,25 @@ func (a *App) startup(ctx context.Context) {
 	db.Init()
 
 	a.cron = cron.New(cron.WithSeconds())
-	a.cron.AddFunc("@every 30s", func() {
+	a.cron.Start()
+
+	s := data.GetSettings()
+	a.scheduleRefresh(s.RefreshSecs)
+	logger.Log.Info("go-crypto started")
+}
+
+func (a *App) scheduleRefresh(secs int) {
+	if secs < 10 {
+		secs = 30
+	}
+	if a.refreshEntryID != 0 {
+		a.cron.Remove(a.refreshEntryID)
+	}
+	id, _ := a.cron.AddFunc(fmt.Sprintf("@every %ds", secs), func() {
 		a.refreshWatchlistPrices()
 		a.checkAlerts()
 	})
-	a.cron.Start()
-	logger.Log.Info("go-crypto started")
+	a.refreshEntryID = id
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -61,17 +75,18 @@ func (a *App) refreshWatchlistPrices() {
 		ids[i] = item.CoinID
 	}
 	s := data.GetSettings()
-	prices, err := a.cgAPI.GetPrices(ids, s.Currency)
+	prices, err := a.cgAPI.GetPricesForWatchlist(ids, s.Currency)
 	if err != nil {
 		logger.Log.Warnf("refresh prices error: %v", err)
 		return
 	}
 	for _, item := range items {
 		if p, ok := prices[item.CoinID]; ok {
-			p.CoinID = item.CoinID
-			p.Symbol = item.Symbol
-			p.Name = item.Name
-			db.DB.Where("coin_id = ?", item.CoinID).Assign(*p).FirstOrCreate(p)
+			var existing models.CachedPrice
+			if db.DB.Where("coin_id = ?", item.CoinID).First(&existing).Error == nil {
+				p.ID = existing.ID
+			}
+			db.DB.Save(p)
 		}
 	}
 	runtime.EventsEmit(a.ctx, "prices-updated", nil)
@@ -236,5 +251,9 @@ func (a *App) GetSettings() *models.Settings {
 }
 
 func (a *App) SaveSettings(s models.Settings) error {
-	return data.SaveSettings(s)
+	if err := data.SaveSettings(s); err != nil {
+		return err
+	}
+	a.scheduleRefresh(s.RefreshSecs)
+	return nil
 }

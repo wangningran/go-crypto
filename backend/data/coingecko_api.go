@@ -26,35 +26,49 @@ func NewCoinGeckoAPI() *CoinGeckoAPI {
 	return &CoinGeckoAPI{client: c}
 }
 
-func (api *CoinGeckoAPI) GetPrices(coinIds []string, currency string) (map[string]*models.CachedPrice, error) {
-	ids := strings.Join(coinIds, ",")
+// GetPricesForWatchlist uses /coins/markets to fetch full price data including 24h high/low.
+func (api *CoinGeckoAPI) GetPricesForWatchlist(coinIds []string, currency string) (map[string]*models.CachedPrice, error) {
 	resp, err := api.client.R().
 		SetQueryParams(map[string]string{
-			"ids":                 ids,
-			"vs_currencies":       currency,
-			"include_24hr_change": "true",
-			"include_24hr_vol":    "true",
-			"include_market_cap":  "true",
+			"vs_currency": currency,
+			"ids":         strings.Join(coinIds, ","),
+			"order":       "market_cap_desc",
+			"per_page":    fmt.Sprintf("%d", len(coinIds)),
+			"page":        "1",
+			"sparkline":   "false",
 		}).
-		Get(cgBase + "/simple/price")
+		Get(cgBase + "/coins/markets")
 	if err != nil {
 		return nil, err
 	}
 
-	var raw map[string]map[string]float64
+	var raw []struct {
+		ID                 string  `json:"id"`
+		Symbol             string  `json:"symbol"`
+		Name               string  `json:"name"`
+		CurrentPrice       float64 `json:"current_price"`
+		PriceChangePercent float64 `json:"price_change_percentage_24h"`
+		TotalVolume        float64 `json:"total_volume"`
+		MarketCap          float64 `json:"market_cap"`
+		High24h            float64 `json:"high_24h"`
+		Low24h             float64 `json:"low_24h"`
+	}
 	if err := json.Unmarshal(resp.Body(), &raw); err != nil {
 		return nil, err
 	}
 
-	result := make(map[string]*models.CachedPrice)
-	cur := strings.ToLower(currency)
-	for id, data := range raw {
-		result[id] = &models.CachedPrice{
-			CoinID:    id,
-			Price:     data[cur],
-			Change24h: data[cur+"_24h_change"],
-			Volume24h: data[cur+"_24h_vol"],
-			MarketCap: data[cur+"_market_cap"],
+	result := make(map[string]*models.CachedPrice, len(raw))
+	for _, c := range raw {
+		result[c.ID] = &models.CachedPrice{
+			CoinID:    c.ID,
+			Symbol:    strings.ToUpper(c.Symbol),
+			Name:      c.Name,
+			Price:     c.CurrentPrice,
+			Change24h: c.PriceChangePercent,
+			Volume24h: c.TotalVolume,
+			MarketCap: c.MarketCap,
+			High24h:   c.High24h,
+			Low24h:    c.Low24h,
 			UpdatedAt: time.Now(),
 		}
 	}
