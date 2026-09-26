@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    name: Go (vet, test, cross-compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Resolve modules
+        run: |
+          go mod tidy
+          if ! git diff --quiet -- go.mod go.sum; then
+            echo "::warning::go.mod/go.sum are not up to date. Run 'go mod tidy' and commit the result."
+          fi
+      - name: Upload go.sum
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-sum
+          path: go.sum
+      - name: Embed placeholder frontend
+        run: mkdir -p frontend/dist && touch frontend/dist/index.html
+      - run: go vet ./...
+      - run: go test ./...
+      # Windows build is pure Go (WebView2), so it compiles on Linux without GTK/WebKit.
+      - name: Cross-compile Windows binary
+        run: GOOS=windows go build -tags desktop,production -o go-crypto.exe .
+
+  frontend:
+    name: Frontend (type-check + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm run build
