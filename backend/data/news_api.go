@@ -2,20 +2,27 @@ package data
 
 import (
 	"encoding/json"
-	"go-crypto/backend/models"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
+
+	"go-crypto/backend/models"
 
 	"github.com/go-resty/resty/v2"
 )
 
-func GetCryptoNews() ([]models.NewsItem, error) {
-	client := resty.NewWithClient(&http.Client{Timeout: 15 * time.Second}).
-		SetHeader("Accept", "application/json")
+var newsClient = resty.NewWithClient(&http.Client{Timeout: 15 * time.Second}).
+	SetHeader("Accept", "application/json")
 
-	resp, err := client.R().Get("https://api.coingecko.com/api/v3/news")
+// GetCryptoNews fetches the latest headlines from CoinGecko's news endpoint.
+func GetCryptoNews() ([]models.NewsItem, error) {
+	resp, err := newsClient.R().Get(cgBase + "/news")
 	if err != nil {
 		return nil, err
+	}
+	if resp.IsError() {
+		return nil, fmt.Errorf("news source unavailable: %w", &APIError{Status: resp.StatusCode(), Body: truncate(resp.String(), 200)})
 	}
 
 	var raw struct {
@@ -23,24 +30,53 @@ func GetCryptoNews() ([]models.NewsItem, error) {
 			Title       string `json:"title"`
 			URL         string `json:"url"`
 			Author      string `json:"author"`
+			NewsSite    string `json:"news_site"`
 			PublishedAt int64  `json:"published_at"`
+			UpdatedAt   int64  `json:"updated_at"`
 			Description string `json:"description"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(resp.Body(), &raw); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("news source returned an unexpected format: %w", err)
 	}
 
 	items := make([]models.NewsItem, 0, len(raw.Data))
 	for _, n := range raw.Data {
-		t := time.Unix(n.PublishedAt, 0).Format("2006-01-02 15:04")
+		ts := n.PublishedAt
+		if ts == 0 {
+			ts = n.UpdatedAt
+		}
+		published := ""
+		if ts > 0 {
+			published = time.Unix(ts, 0).Format("2006-01-02 15:04")
+		}
+		source := n.NewsSite
+		if source == "" {
+			source = n.Author
+		}
 		items = append(items, models.NewsItem{
 			Title:       n.Title,
 			URL:         n.URL,
-			Source:      n.Author,
-			PublishedAt: t,
+			Source:      source,
+			PublishedAt: published,
 			Summary:     n.Description,
 		})
 	}
 	return items, nil
+}
+
+// FilterNews keeps headlines that mention the coin's name or symbol.
+func FilterNews(items []models.NewsItem, name, symbol string, limit int) []models.NewsItem {
+	name, symbol = strings.ToLower(name), strings.ToLower(symbol)
+	var out []models.NewsItem
+	for _, n := range items {
+		text := " " + strings.ToLower(n.Title+" "+n.Summary) + " "
+		if (name != "" && strings.Contains(text, name)) || (symbol != "" && strings.Contains(text, " "+symbol+" ")) {
+			out = append(out, n)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
 }
