@@ -6,11 +6,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-resty/resty/v2"
 	"go-crypto/backend/models"
+
+	"github.com/go-resty/resty/v2"
 )
 
 // rssFeeds are parsed in order; results are merged and deduplicated by URL.
+// CoinGecko /news now requires a paid API key (returns 401 on the free tier).
 var rssFeeds = []string{
 	"https://cointelegraph.com/rss",
 	"https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -32,21 +34,31 @@ type rssItem struct {
 	Desc    string `xml:"description"`
 }
 
-func GetCryptoNews() ([]models.NewsItem, error) {
-	client := resty.NewWithClient(&http.Client{Timeout: 15 * time.Second}).
-		SetHeader("Accept", "application/rss+xml, text/xml")
+var newsClient = resty.NewWithClient(&http.Client{Timeout: 15 * time.Second}).
+	SetHeader("Accept", "application/rss+xml, text/xml")
 
-	seen := make(map[string]bool)
+var newsCache = newTTLCache(4)
+
+// GetCryptoNews fetches headlines from Cointelegraph and CoinDesk RSS feeds.
+func GetCryptoNews() ([]models.NewsItem, error) {
 	var items []models.NewsItem
+	seen := make(map[string]bool)
 
 	for _, feedURL := range rssFeeds {
-		resp, err := client.R().Get(feedURL)
+		feedURL := feedURL
+		body, err := newsCache.Do(feedURL, 5*time.Minute, 2*time.Minute, func() ([]byte, error) {
+			resp, err := newsClient.R().Get(feedURL)
+			if err != nil {
+				return nil, err
+			}
+			return resp.Body(), nil
+		})
 		if err != nil {
 			continue
 		}
 
 		var feed rssFeed
-		if err := xml.Unmarshal(resp.Body(), &feed); err != nil {
+		if err := xml.Unmarshal(body, &feed); err != nil {
 			continue
 		}
 
@@ -74,6 +86,22 @@ func GetCryptoNews() ([]models.NewsItem, error) {
 	}
 
 	return items, nil
+}
+
+// FilterNews keeps headlines that mention the coin's name or symbol.
+func FilterNews(items []models.NewsItem, name, symbol string, limit int) []models.NewsItem {
+	name, symbol = strings.ToLower(name), strings.ToLower(symbol)
+	var out []models.NewsItem
+	for _, n := range items {
+		text := " " + strings.ToLower(n.Title+" "+n.Summary) + " "
+		if (name != "" && strings.Contains(text, name)) || (symbol != "" && strings.Contains(text, " "+symbol+" ")) {
+			out = append(out, n)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
 }
 
 func feedSource(url string) string {
