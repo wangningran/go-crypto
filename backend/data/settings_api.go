@@ -3,8 +3,14 @@ package data
 import (
 	"go-crypto/backend/db"
 	"go-crypto/backend/models"
+	"os"
+	"strings"
 )
 
+// GetSettings loads settings from DB, then overrides with env vars if set.
+// GO_CRYPTO_LLM_API_KEY  — overrides OpenAIKey
+// GO_CRYPTO_LLM_BASE     — overrides OpenAIBase
+// GO_CRYPTO_LLM_MODEL    — overrides OpenAIModel
 func GetSettings() *models.Settings {
 	var s models.Settings
 	result := db.DB.First(&s, 1)
@@ -18,6 +24,17 @@ func GetSettings() *models.Settings {
 		}
 		db.DB.Create(&s)
 	}
+
+	if v := strings.TrimSpace(os.Getenv("GO_CRYPTO_LLM_API_KEY")); v != "" {
+		s.OpenAIKey = v
+	}
+	if v := strings.TrimSpace(os.Getenv("GO_CRYPTO_LLM_BASE")); v != "" {
+		s.OpenAIBase = v
+	}
+	if v := strings.TrimSpace(os.Getenv("GO_CRYPTO_LLM_MODEL")); v != "" {
+		s.OpenAIModel = v
+	}
+
 	return &s
 }
 
