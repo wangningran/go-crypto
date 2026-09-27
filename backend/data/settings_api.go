@@ -27,7 +27,10 @@ func defaultSettings() models.Settings {
 	}
 }
 
-// GetSettings returns the stored settings (database only; cheap).
+// GetSettings returns the stored settings (database only; cheap), with
+// GO_CRYPTO_LLM_BASE / GO_CRYPTO_LLM_MODEL overriding the DB values when set.
+// The API key itself is never stored on this struct — see GetAPIKey, which
+// already falls back to GO_CRYPTO_LLM_API_KEY when no keychain entry exists.
 func GetSettings() *models.Settings {
 	var s models.Settings
 	if err := db.DB.First(&s, 1).Error; err != nil {
@@ -35,9 +38,6 @@ func GetSettings() *models.Settings {
 		db.DB.Create(&s)
 	}
 
-	if v := strings.TrimSpace(os.Getenv("GO_CRYPTO_LLM_API_KEY")); v != "" {
-		s.OpenAIKey = v
-	}
 	if v := strings.TrimSpace(os.Getenv("GO_CRYPTO_LLM_BASE")); v != "" {
 		s.OpenAIBase = v
 	}
