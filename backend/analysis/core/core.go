@@ -124,7 +124,11 @@ func ComputeStats(recs []models.AnalysisRecord) models.EvalStats {
 	var nBad int
 	for _, r := range recs {
 		if r.Correct == nil {
-			st.Pending++
+			if r.EvaluatedAt != nil {
+				st.Unscorable++ // gave up fetching the +24h price
+			} else {
+				st.Pending++
+			}
 			continue
 		}
 		st.Evaluated++

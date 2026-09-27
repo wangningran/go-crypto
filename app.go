@@ -25,7 +25,8 @@ type App struct {
 	analysis       *analysis.Service
 	cron           *cron.Cron
 	refreshEntryID cron.EntryID
-	refreshMu      sync.Mutex
+	schedMu        sync.Mutex // guards refreshEntryID
+	refreshMu      sync.Mutex // serializes price refreshes
 }
 
 func NewApp() *App {
@@ -38,7 +39,9 @@ func (a *App) startup(ctx context.Context) {
 	db.Init()
 	data.MigrateLegacyAPIKey()
 
-	a.cron = cron.New(cron.WithSeconds())
+	// SkipIfStillRunning: if a refresh is slow (e.g. network timeouts), the next
+	// tick is skipped instead of queuing up goroutines behind it.
+	a.cron = cron.New(cron.WithSeconds(), cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger)))
 	a.cron.Start()
 
 	s := data.GetSettings()
@@ -58,9 +61,9 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) scheduleRefresh(secs int) {
-	if secs < 10 {
-		secs = 30
-	}
+	secs = data.ClampRefreshSecs(secs)
+	a.schedMu.Lock()
+	defer a.schedMu.Unlock()
 	if a.refreshEntryID != 0 {
 		a.cron.Remove(a.refreshEntryID)
 	}
@@ -111,7 +114,9 @@ func (a *App) refreshWatchlistPrices() {
 		if db.DB.Where("coin_id = ?", item.CoinID).First(&existing).Error == nil {
 			p.ID = existing.ID
 		}
-		db.DB.Save(&p)
+		if err := db.DB.Save(&p).Error; err != nil {
+			logger.Log.Warnf("save price %s: %v", item.CoinID, err)
+		}
 	}
 	runtime.EventsEmit(a.ctx, "prices-updated", nil)
 }
@@ -139,9 +144,13 @@ func (a *App) checkAlerts() {
 			continue
 		}
 		now := time.Now().UTC()
-		db.DB.Model(&models.PriceAlert{ID: alert.ID}).
+		if err := db.DB.Model(&models.PriceAlert{ID: alert.ID}).
 			Select("Enabled", "TriggeredAt", "LastMessage").
-			Updates(models.PriceAlert{Enabled: false, TriggeredAt: &now, LastMessage: msg})
+			Updates(models.PriceAlert{Enabled: false, TriggeredAt: &now, LastMessage: msg}).Error; err != nil {
+			// Don't notify if we couldn't pause it, or it would fire again next tick.
+			logger.Log.Warnf("pause alert %d: %v", alert.ID, err)
+			continue
+		}
 		runtime.EventsEmit(a.ctx, "price-alert", map[string]string{
 			"coinId":  alert.CoinID,
 			"symbol":  alert.Symbol,
@@ -310,6 +319,11 @@ func (a *App) AnalyzeCoin(coinId string) (*models.AnalysisRecord, error) {
 	})
 }
 
+// CancelAnalysis stops a running analysis (called when the user closes the panel).
+func (a *App) CancelAnalysis(coinId string) {
+	a.analysis.Cancel(coinId)
+}
+
 func (a *App) GetAnalysisHistory(limit int) []models.AnalysisRecord {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -347,7 +361,9 @@ func (a *App) SaveSettings(s models.Settings) error {
 	a.scheduleRefresh(s.RefreshSecs)
 	if !strings.EqualFold(old.Currency, s.Currency) {
 		// Prices in the old currency are no longer valid.
-		db.DB.Where("1 = 1").Delete(&models.CachedPrice{})
+		if err := db.DB.Where("1 = 1").Delete(&models.CachedPrice{}).Error; err != nil {
+			logger.Log.Warnf("clear cached prices: %v", err)
+		}
 		go a.refreshNow()
 	}
 	return nil

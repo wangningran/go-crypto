@@ -10,6 +10,10 @@ export function AnalyzeCoin(arg1) {
   return window['go']['main']['App']['AnalyzeCoin'](arg1);
 }
 
+export function CancelAnalysis(arg1) {
+  return window['go']['main']['App']['CancelAnalysis'](arg1);
+}
+
 export function ClearAPIKey() {
   return window['go']['main']['App']['ClearAPIKey']();
 }

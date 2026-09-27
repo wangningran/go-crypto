@@ -46,6 +46,8 @@ export namespace models {
 	    priceAfter24h: number;
 	    returnPct: number;
 	    correct?: boolean;
+	    evalAttempts: number;
+	    evalError: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new AnalysisRecord(source);
@@ -74,6 +76,8 @@ export namespace models {
 	        this.priceAfter24h = source["priceAfter24h"];
 	        this.returnPct = source["returnPct"];
 	        this.correct = source["correct"];
+	        this.evalAttempts = source["evalAttempts"];
+	        this.evalError = source["evalError"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -187,6 +191,7 @@ export namespace models {
 	    total: number;
 	    evaluated: number;
 	    pending: number;
+	    unscorable: number;
 	    correct: number;
 	    accuracy: number;
 	    avgConfidenceCorrect: number;
@@ -203,6 +208,7 @@ export namespace models {
 	        this.total = source["total"];
 	        this.evaluated = source["evaluated"];
 	        this.pending = source["pending"];
+	        this.unscorable = source["unscorable"];
 	        this.correct = source["correct"];
 	        this.accuracy = source["accuracy"];
 	        this.avgConfidenceCorrect = source["avgConfidenceCorrect"];

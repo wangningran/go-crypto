@@ -47,19 +47,20 @@ The agent loop (`backend/agent`) is written from scratch on the chat completions
 
 - **Code computes, the model interprets.** Moving averages, RSI and volatility are computed in Go (`backend/indicators`, unit-tested) from CoinGecko history. The prompt forbids numbers that did not come from a tool. The first version sent six 24h numbers and asked for "trend and key levels", and the model had to guess.
 - **Structured output through a tool.** `submit_analysis` has a JSON Schema. The output is validated in `backend/analysis/core`: the direction enum is normalized, confidence is clamped to 0–1 (a 0–100 answer is converted), and support/resistance are swapped if reversed.
-- **Every call is scored.** A cron job checks analyses older than 24h against the price at +24h:
+- **Every call is scored.** Every 30 minutes a job checks analyses older than 24h against the price at +24h. If the analysis-time price is more than 5 minutes old, it is re-fetched first, because it is the baseline. Records whose +24h price can't be fetched are retried, and after 6 attempts marked "unscorable", so they never block newer records. The scoring rules:
   - bullish is right if the price rose
   - bearish is right if it fell
   - neutral is right if it moved less than ±1%
   
   This turns "the AI sounds smart" into a number, and shows whether its confidence means anything.
-- **Cost and rate limits.** Results are cached for 5 minutes per coin and model. CoinGecko responses are cached in memory (20s–10min), and the evaluator scores a few records per run to stay within the free API limit.
+- **Cost and rate limits.** Results are cached for 5 minutes per coin and model. Closing the panel cancels a running analysis, so no more tokens are spent on it. CoinGecko responses are cached in memory for 20s to 10min by a small TTL cache (`backend/data/ttlcache.go`); concurrent requests for the same data share one API call. After an HTTP 429, all CoinGecko calls pause (honoring `Retry-After`) instead of making the limit worse. The evaluator scores at most a few records per run, 3s apart.
 - **Live progress without token streaming.** Each tool call is pushed to the UI as a Wails event, so you can watch the agent work.
 
 ## Other engineering notes
 
-- **Pure-Go SQLite** (`glebarez/sqlite`, based on `modernc.org/sqlite`): no cgo, no C toolchain.
-- **API key in the OS keychain** (macOS Keychain, Windows Credential Manager, Linux Secret Service) via `zalando/go-keyring`, never in SQLite. Keys saved by older versions are migrated on startup.
+- **Pure-Go SQLite** (`glebarez/sqlite`, based on `modernc.org/sqlite`): no cgo, no C toolchain. WAL mode plus a 5s busy timeout, because the price refresh, the evaluator and UI actions write concurrently. All timestamps are stored in UTC.
+- **Background jobs never pile up.** If a refresh is still running (e.g. slow network), the next tick is skipped instead of queued.
+- **API key in the OS keychain** (macOS Keychain, Windows Credential Manager, Linux Secret Service) via `zalando/go-keyring`, never in SQLite. Keys saved by older versions are migrated on startup. On Linux without a keychain, set `GO_CRYPTO_LLM_API_KEY` instead.
 - **Currency-safe.** Prices and alerts record their currency. An alert set in EUR is never compared with a USD price, and switching currency clears and re-fetches cached prices.
 - **Explicit errors.** CoinGecko HTTP errors, including 429 rate limits, are reported in the UI instead of showing `$0`.
 - **Typed frontend.** Components use the Wails-generated TypeScript bindings (`frontend/wailsjs`) rather than `window.go`. Event listeners are cleaned up on unmount.
@@ -84,11 +85,10 @@ Requirements: Go 1.22+, Node.js 18+, [Wails v2](https://wails.io/docs/gettingsta
 ```bash
 go install github.com/wailsapp/wails/v2/cmd/wails@v2.9.0
 
-go mod tidy        # first time: resolves modules and writes go.sum
 wails dev          # dev mode with hot reload
 wails build        # production binary in build/bin/
 
-go test ./...      # backend unit tests
+go test ./...      # unit tests + SQLite integration tests
 ```
 
 ## AI configuration

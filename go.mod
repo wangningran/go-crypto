@@ -3,7 +3,6 @@ module go-crypto
 go 1.22
 
 require (
-	github.com/coocood/freecache v1.2.4
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-resty/resty/v2 v2.12.0
 	github.com/robfig/cron/v3 v3.0.1

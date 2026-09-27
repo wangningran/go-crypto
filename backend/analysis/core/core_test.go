@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"testing"
+	"time"
 
 	"go-crypto/backend/models"
 )
@@ -53,14 +54,16 @@ func TestJudge(t *testing.T) {
 
 func TestComputeStats(t *testing.T) {
 	yes, no := true, false
+	now := time.Now()
 	recs := []models.AnalysisRecord{
 		{Direction: "bullish", Confidence: 0.8, Correct: &yes},
 		{Direction: "bullish", Confidence: 0.6, Correct: &no},
 		{Direction: "bearish", Confidence: 0.4, Correct: &yes},
-		{Direction: "neutral", Confidence: 0.5}, // pending
+		{Direction: "neutral", Confidence: 0.5},                    // pending
+		{Direction: "neutral", Confidence: 0.5, EvaluatedAt: &now}, // unscorable
 	}
 	st := ComputeStats(recs)
-	if st.Total != 4 || st.Evaluated != 3 || st.Pending != 1 || st.Correct != 2 {
+	if st.Total != 5 || st.Evaluated != 3 || st.Pending != 1 || st.Unscorable != 1 || st.Correct != 2 {
 		t.Fatalf("counts wrong: %+v", st)
 	}
 	if math.Abs(st.Accuracy-2.0/3) > 1e-9 || math.Abs(st.AvgConfidenceCorrect-0.6) > 1e-9 || math.Abs(st.AvgConfidenceWrong-0.6) > 1e-9 {

@@ -86,7 +86,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, h } from 'vue'
+import { ref, watch, onMounted, onUnmounted, h } from 'vue'
 import {
   NButton, NDataTable, NModal, NInput, NList, NListItem, NThing, NDrawer, NDrawerContent, NSpin,
   NForm, NFormItem, NInputNumber, NTimeline, NTimelineItem, NAlert, NTag, NSpace, NGrid, NGridItem,
@@ -94,7 +94,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import {
-  GetWatchlistPrices, SearchCoins, AddToWatchlist, RemoveFromWatchlist, AnalyzeCoin, GetAlert, SetAlert,
+  GetWatchlistPrices, SearchCoins, AddToWatchlist, RemoveFromWatchlist, AnalyzeCoin, CancelAnalysis, GetAlert, SetAlert,
 } from '../../wailsjs/go/main/App'
 import type { models } from '../../wailsjs/go/models'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
@@ -167,7 +167,8 @@ async function loadPrices() {
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 function onSearch() {
   clearTimeout(searchTimer)
-  if (!searchQuery.value) { searchResults.value = []; return }
+  // Each search is an API call on a rate-limited free tier: wait for 2+ characters.
+  if (searchQuery.value.trim().length < 2) { searchResults.value = []; return }
   searchTimer = setTimeout(async () => {
     try {
       searchResults.value = await SearchCoins(searchQuery.value)
@@ -209,11 +210,17 @@ async function analyze(coinId: string, name: string) {
     result.value = rec
     if (rec.cached && rec.steps) steps.value = rec.steps
   } catch (e) {
-    analysisError.value = errorText(e)
+    // Don't show "cancelled" if the user closed the panel on purpose.
+    if (showAnalysis.value) analysisError.value = errorText(e)
   } finally {
     analysisLoading.value = false
   }
 }
+
+// Closing the panel mid-analysis cancels it, so no more LLM tokens are spent.
+watch(showAnalysis, (open) => {
+  if (!open && analysisLoading.value && selectedCoinId.value) CancelAnalysis(selectedCoinId.value)
+})
 
 async function openAlert(row: models.CachedPrice) {
   alertCoinId.value = row.coinId

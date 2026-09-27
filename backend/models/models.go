@@ -115,11 +115,14 @@ type AnalysisRecord struct {
 	Cached           bool        `json:"cached" gorm:"-"`
 	CreatedAt        time.Time   `json:"createdAt" gorm:"index"`
 
-	// Filled in by the evaluator 24h later.
+	// Filled in by the evaluator 24h later. If the price can't be fetched after
+	// several attempts, EvaluatedAt is set with Correct left nil ("unscorable").
 	EvaluatedAt   *time.Time `json:"evaluatedAt"`
 	PriceAfter24h float64    `json:"priceAfter24h"`
 	ReturnPct     float64    `json:"returnPct"`
 	Correct       *bool      `json:"correct"`
+	EvalAttempts  int        `json:"evalAttempts"`
+	EvalError     string     `json:"evalError" gorm:"size:300"`
 }
 
 type DirectionStats struct {
@@ -134,6 +137,7 @@ type EvalStats struct {
 	Total                int              `json:"total"`
 	Evaluated            int              `json:"evaluated"`
 	Pending              int              `json:"pending"`
+	Unscorable           int              `json:"unscorable"`
 	Correct              int              `json:"correct"`
 	Accuracy             float64          `json:"accuracy"`
 	AvgConfidenceCorrect float64          `json:"avgConfidenceCorrect"`

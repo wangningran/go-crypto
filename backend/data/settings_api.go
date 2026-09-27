@@ -2,6 +2,7 @@ package data
 
 import (
 	"errors"
+	"os"
 	"strings"
 
 	"go-crypto/backend/db"
@@ -57,22 +58,48 @@ func SaveSettings(s models.Settings) error {
 	if s.Currency == "" {
 		s.Currency = "usd"
 	}
+	s.RefreshSecs = ClampRefreshSecs(s.RefreshSecs)
 	if k := strings.TrimSpace(s.APIKey); k != "" {
 		if err := keyring.Set(keyringService, keyringUser, k); err != nil {
-			return errors.New("could not save the API key to the system keychain: " + err.Error())
+			return errors.New("could not save the API key to the system keychain (" + err.Error() + "). " +
+				"On Linux without a keychain, set the " + apiKeyEnv + " environment variable instead")
 		}
 	}
 	s.APIKey = ""
 	return db.DB.Save(&s).Error
 }
 
-// GetAPIKey reads the key from the OS keychain. Missing key -> "", nil.
+// ClampRefreshSecs keeps the refresh interval within 10s..1h.
+func ClampRefreshSecs(secs int) int {
+	switch {
+	case secs <= 0:
+		return 30
+	case secs < 10:
+		return 10
+	case secs > 3600:
+		return 3600
+	}
+	return secs
+}
+
+// apiKeyEnv is a fallback for systems without a keychain (e.g. Linux without
+// a Secret Service daemon): export GO_CRYPTO_LLM_API_KEY=... before starting.
+const apiKeyEnv = "GO_CRYPTO_LLM_API_KEY"
+
+// GetAPIKey reads the key from the OS keychain, falling back to the
+// GO_CRYPTO_LLM_API_KEY environment variable. Missing key -> "", nil.
 func GetAPIKey() (string, error) {
 	k, err := keyring.Get(keyringService, keyringUser)
-	if errors.Is(err, keyring.ErrNotFound) {
+	if err == nil && k != "" {
+		return k, nil
+	}
+	if env := strings.TrimSpace(os.Getenv(apiKeyEnv)); env != "" {
+		return env, nil
+	}
+	if err == nil || errors.Is(err, keyring.ErrNotFound) {
 		return "", nil
 	}
-	return k, err
+	return "", err
 }
 
 // ClearAPIKey removes the key from the keychain.

@@ -6,6 +6,8 @@ export function AddToWatchlist(arg1:string,arg2:string,arg3:string):Promise<void
 
 export function AnalyzeCoin(arg1:string):Promise<models.AnalysisRecord>;
 
+export function CancelAnalysis(arg1:string):Promise<void>;
+
 export function ClearAPIKey():Promise<void>;
 
 export function DeleteAlert(arg1:number):Promise<void>;

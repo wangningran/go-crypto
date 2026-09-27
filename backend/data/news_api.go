@@ -12,17 +12,27 @@ import (
 	"github.com/go-resty/resty/v2"
 )
 
-var newsClient = resty.NewWithClient(&http.Client{Timeout: 15 * time.Second}).
+var newsClient = resty.NewWithClient(&http.Client{Timeout: 10 * time.Second}).
 	SetHeader("Accept", "application/json")
+
+// News changes slowly: cache it for 5 minutes, and cache failures for 2
+// minutes so a broken endpoint isn't called on every AI analysis.
+var newsCache = newTTLCache(4)
 
 // GetCryptoNews fetches the latest headlines from CoinGecko's news endpoint.
 func GetCryptoNews() ([]models.NewsItem, error) {
-	resp, err := newsClient.R().Get(cgBase + "/news")
+	body, err := newsCache.Do("news", 5*time.Minute, 2*time.Minute, func() ([]byte, error) {
+		resp, err := newsClient.R().Get(cgBase + "/news")
+		if err != nil {
+			return nil, err
+		}
+		if resp.IsError() {
+			return nil, fmt.Errorf("news source unavailable: %w", &APIError{Status: resp.StatusCode(), Body: truncate(resp.String(), 200)})
+		}
+		return resp.Body(), nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	if resp.IsError() {
-		return nil, fmt.Errorf("news source unavailable: %w", &APIError{Status: resp.StatusCode(), Body: truncate(resp.String(), 200)})
 	}
 
 	var raw struct {
@@ -36,7 +46,7 @@ func GetCryptoNews() ([]models.NewsItem, error) {
 			Description string `json:"description"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(resp.Body(), &raw); err != nil {
+	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("news source returned an unexpected format: %w", err)
 	}
 

@@ -1,0 +1,31 @@
+name: go mod tidy
+
+# Keeps go.mod/go.sum committed and up to date: after each push to main,
+# run `go mod tidy` and commit the result if anything changed.
+on:
+  push:
+    branches: [main]
+    paths: ["**.go", "go.mod", "go.sum"]
+
+permissions:
+  contents: write
+
+jobs:
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - run: go mod tidy
+      - name: Commit go.mod / go.sum if changed
+        run: |
+          if git diff --quiet -- go.mod go.sum && git ls-files --error-unmatch go.sum >/dev/null 2>&1; then
+            echo "go.mod/go.sum already tidy"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add go.mod go.sum
+          git commit -m "chore: go mod tidy"
+          git push

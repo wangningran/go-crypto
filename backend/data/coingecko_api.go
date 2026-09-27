@@ -2,16 +2,18 @@ package data
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go-crypto/backend/indicators"
 	"go-crypto/backend/models"
 
-	"github.com/coocood/freecache"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -32,33 +34,78 @@ func (e *APIError) Error() string {
 
 type CoinGeckoAPI struct {
 	client *resty.Client
-	cache  *freecache.Cache
+	cache  *ttlCache
+
+	mu           sync.Mutex
+	blockedUntil time.Time // set after a 429: no requests until then
 }
 
 func NewCoinGeckoAPI() *CoinGeckoAPI {
-	c := resty.NewWithClient(&http.Client{Timeout: 15 * time.Second}).
-		SetRetryCount(2).
+	c := resty.NewWithClient(&http.Client{Timeout: 10 * time.Second}).
+		// Retries only happen on network errors (resty's default), never on HTTP 4xx/5xx.
+		SetRetryCount(1).
 		SetRetryWaitTime(2*time.Second).
 		SetHeader("Accept", "application/json")
-	return &CoinGeckoAPI{client: c, cache: freecache.NewCache(4 * 1024 * 1024)}
+	return &CoinGeckoAPI{client: c, cache: newTTLCache(256)}
 }
 
+// rateLimitCooldown is how long all requests pause after a 429 when the
+// response has no Retry-After header.
+const rateLimitCooldown = 60 * time.Second
+
 // get performs a GET, checks the HTTP status and decodes JSON into out.
+// After a 429 it refuses to call CoinGecko until the cooldown ends, so a
+// rate-limited app backs off instead of making the limit worse.
 func (api *CoinGeckoAPI) get(path string, params map[string]string, out any) error {
-	resp, err := api.client.R().SetQueryParams(params).Get(cgBase + path)
+	body, err := api.getRaw(path, params)
 	if err != nil {
 		return err
 	}
-	if resp.IsError() {
-		return &APIError{Status: resp.StatusCode(), Body: truncate(resp.String(), 200)}
+	return decode(path, body, out)
+}
+
+func (api *CoinGeckoAPI) getRaw(path string, params map[string]string) ([]byte, error) {
+	api.mu.Lock()
+	wait := time.Until(api.blockedUntil)
+	api.mu.Unlock()
+	if wait > 0 {
+		return nil, &APIError{Status: http.StatusTooManyRequests, Body: fmt.Sprintf("cooling down for %ds", int(wait.Seconds())+1)}
 	}
-	if err := json.Unmarshal(resp.Body(), out); err != nil {
+
+	resp, err := api.client.R().SetQueryParams(params).Get(cgBase + path)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode() == http.StatusTooManyRequests {
+		cool := rateLimitCooldown
+		if secs, err := strconv.Atoi(resp.Header().Get("Retry-After")); err == nil && secs > 0 && secs < 600 {
+			cool = time.Duration(secs) * time.Second
+		}
+		api.mu.Lock()
+		api.blockedUntil = time.Now().Add(cool)
+		api.mu.Unlock()
+	}
+	if resp.IsError() {
+		return nil, &APIError{Status: resp.StatusCode(), Body: truncate(resp.String(), 200)}
+	}
+	return resp.Body(), nil
+}
+
+func decode(path string, body []byte, out any) error {
+	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("decode %s: %w", path, err)
 	}
 	return nil
 }
 
-// cachedGet is get with a short in-memory cache, to stay under the free-tier rate limit.
+// IsRateLimited reports whether err is (or wraps) a CoinGecko 429.
+func IsRateLimited(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && ae.Status == http.StatusTooManyRequests
+}
+
+// cachedGet is get with an in-memory cache (and request de-duplication), to
+// stay under the free-tier rate limit.
 func (api *CoinGeckoAPI) cachedGet(path string, params map[string]string, ttl time.Duration, out any) error {
 	keys := make([]string, 0, len(params))
 	for k := range params {
@@ -70,16 +117,13 @@ func (api *CoinGeckoAPI) cachedGet(path string, params map[string]string, ttl ti
 	for _, k := range keys {
 		sb.WriteString("|" + k + "=" + params[k])
 	}
-	key := []byte(sb.String())
-	if b, err := api.cache.Get(key); err == nil {
-		return json.Unmarshal(b, out)
-	}
-	var raw json.RawMessage
-	if err := api.get(path, params, &raw); err != nil {
+	body, err := api.cache.Do(sb.String(), ttl, 0, func() ([]byte, error) {
+		return api.getRaw(path, params)
+	})
+	if err != nil {
 		return err
 	}
-	_ = api.cache.Set(key, raw, int(ttl.Seconds()))
-	return json.Unmarshal(raw, out)
+	return decode(path, body, out)
 }
 
 // marketsRow is one row of /coins/markets.

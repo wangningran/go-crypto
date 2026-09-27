@@ -24,15 +24,42 @@ import (
 // stored analysis instead of paying for another LLM run.
 const CacheTTL = 5 * time.Minute
 
+// MaxPriceAge: if the cached price is older than this (e.g. refreshes have
+// been failing), Analyze fetches a fresh one first. The price at analysis time
+// is the baseline the 24h score is measured from, so it must be current.
+const MaxPriceAge = 5 * time.Minute
+
+// maxEvalAttempts: after this many failed tries (one per evaluator run, every
+// 30 min) an analysis is marked unscorable so it stops blocking the queue.
+const maxEvalAttempts = 6
+
+// storedResultChars caps each tool result kept in the database.
+const storedResultChars = 1500
+
 type Service struct {
 	CG *data.CoinGeckoAPI
+	// priceAt returns the historical price at time t (overridable in tests).
+	priceAt func(coinID, currency string, t time.Time) (float64, error)
+	// evalPause is the delay between evaluator API calls (rate limit).
+	evalPause time.Duration
 
-	mu       sync.Mutex
-	inFlight map[string]bool
+	mu      sync.Mutex
+	running map[string]context.CancelFunc // coinID -> cancel of the running analysis
+	evalMu  sync.Mutex
 }
 
 func NewService(cg *data.CoinGeckoAPI) *Service {
-	return &Service{CG: cg, inFlight: map[string]bool{}}
+	return &Service{CG: cg, priceAt: cg.GetPriceAt, evalPause: 3 * time.Second, running: map[string]context.CancelFunc{}}
+}
+
+// Cancel stops a running analysis for coinID (e.g. the user closed the panel),
+// so no more LLM tokens are spent on it.
+func (s *Service) Cancel(coinID string) {
+	s.mu.Lock()
+	if cancel, ok := s.running[coinID]; ok {
+		cancel()
+	}
+	s.mu.Unlock()
 }
 
 // Analyze runs (or returns a cached) analysis for a watchlist coin.
@@ -56,14 +83,24 @@ func (s *Service) Analyze(ctx context.Context, coinID string, onStep func(models
 		return &recent, nil
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
 	s.mu.Lock()
-	if s.inFlight[coinID] {
+	if _, busy := s.running[coinID]; busy {
 		s.mu.Unlock()
 		return nil, errors.New("an analysis for this coin is already running")
 	}
-	s.inFlight[coinID] = true
+	s.running[coinID] = cancel
 	s.mu.Unlock()
-	defer func() { s.mu.Lock(); delete(s.inFlight, coinID); s.mu.Unlock() }()
+	defer func() { s.mu.Lock(); delete(s.running, coinID); s.mu.Unlock() }()
+
+	if time.Since(cp.UpdatedAt) > MaxPriceAge {
+		fresh, err := s.freshPrice(cp, cur)
+		if err != nil {
+			return nil, fmt.Errorf("the saved price is %s old and refreshing it failed: %w", time.Since(cp.UpdatedAt).Round(time.Minute), err)
+		}
+		cp = fresh
+	}
 
 	key, err := data.GetAPIKey()
 	if err != nil {
@@ -85,9 +122,10 @@ func (s *Service) Analyze(ctx context.Context, coinID string, onStep func(models
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	defer cancel()
 	res, err := runner.Run(ctx, core.SystemPrompt, core.UserPrompt(cp.Name, cp.Symbol, cp.CoinID, cur))
+	if errors.Is(err, context.Canceled) {
+		return nil, errors.New("analysis cancelled")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +138,14 @@ func (s *Service) Analyze(ctx context.Context, coinID string, onStep func(models
 	for _, st := range res.Steps {
 		steps = append(steps, toModelStep(st))
 	}
-	stepsJSON, _ := json.Marshal(steps)
+	stored := make([]models.AgentStep, len(steps))
+	for i, st := range steps {
+		if len(st.Result) > storedResultChars {
+			st.Result = st.Result[:storedResultChars] + "…"
+		}
+		stored[i] = st
+	}
+	stepsJSON, _ := json.Marshal(stored)
 
 	rec := &models.AnalysisRecord{
 		CoinID:           cp.CoinID,
@@ -123,6 +168,23 @@ func (s *Service) Analyze(ctx context.Context, coinID string, onStep func(models
 		logger.Log.Warnf("save analysis: %v", err)
 	}
 	return rec, nil
+}
+
+// freshPrice fetches the current price for one coin and updates the cache table.
+func (s *Service) freshPrice(cp models.CachedPrice, cur string) (models.CachedPrice, error) {
+	prices, err := s.CG.GetPricesForWatchlist([]string{cp.CoinID}, cur)
+	if err != nil {
+		return cp, err
+	}
+	p, ok := prices[cp.CoinID]
+	if !ok {
+		return cp, errors.New("coin not returned by CoinGecko")
+	}
+	p.ID = cp.ID
+	if err := db.DB.Save(&p).Error; err != nil {
+		logger.Log.Warnf("save fresh price: %v", err)
+	}
+	return p, nil
 }
 
 func isLocal(base string) bool {
@@ -224,45 +286,82 @@ func (s *Service) tools(cp models.CachedPrice, cur string) []agent.Tool {
 	}
 }
 
-// EvaluatePending scores analyses that are at least 24h old. It handles a few
-// per run to stay within CoinGecko's free rate limit.
-func (s *Service) EvaluatePending(max int) {
+// EvaluatePending scores analyses that are at least 24h old. It handles at
+// most max per run, pauses between API calls, and stops early on a rate limit.
+// Records that keep failing are retried on later runs and, after
+// maxEvalAttempts, marked unscorable so newer records aren't blocked behind them.
+// Returns the number of records scored.
+func (s *Service) EvaluatePending(max int) int {
+	if !s.evalMu.TryLock() {
+		return 0 // another run (cron or the "Score now" button) is in progress
+	}
+	defer s.evalMu.Unlock()
+
 	var recs []models.AnalysisRecord
-	db.DB.Where("evaluated_at IS NULL AND created_at <= ?", time.Now().UTC().Add(-24*time.Hour)).
-		Order("created_at asc").Limit(max).Find(&recs)
-	for _, r := range recs {
-		target := r.CreatedAt.Add(24 * time.Hour)
-		price, err := s.CG.GetPriceAt(r.CoinID, r.Currency, target)
-		if err != nil {
-			logger.Log.Warnf("evaluate analysis %d: %v", r.ID, err)
-			continue
+	db.DB.Omit("steps_json").
+		Where("evaluated_at IS NULL AND created_at <= ?", time.Now().UTC().Add(-24*time.Hour)).
+		Order("eval_attempts asc, created_at asc").Limit(max).Find(&recs)
+
+	scored := 0
+	for i, r := range recs {
+		if i > 0 && s.evalPause > 0 {
+			time.Sleep(s.evalPause)
 		}
-		ret, ok, err := core.Judge(r.Direction, r.PriceAtAnalysis, price)
+		price, err := s.priceAt(r.CoinID, r.Currency, r.CreatedAt.Add(24*time.Hour))
+		var ret float64
+		var ok bool
+		if err == nil {
+			ret, ok, err = core.Judge(r.Direction, r.PriceAtAnalysis, price)
+		}
 		if err != nil {
-			logger.Log.Warnf("evaluate analysis %d: %v", r.ID, err)
+			logger.Log.Warnf("evaluate analysis %d (attempt %d): %v", r.ID, r.EvalAttempts+1, err)
+			upd := models.AnalysisRecord{EvalAttempts: r.EvalAttempts + 1, EvalError: truncate(err.Error(), 300)}
+			fields := []any{"EvalAttempts", "EvalError"}
+			if upd.EvalAttempts >= maxEvalAttempts {
+				now := time.Now().UTC()
+				upd.EvaluatedAt = &now // give up: unscorable (Correct stays nil)
+				fields = append(fields, "EvaluatedAt")
+			}
+			if dbErr := db.DB.Model(&models.AnalysisRecord{ID: r.ID}).Select(fields[0], fields[1:]...).Updates(upd).Error; dbErr != nil {
+				logger.Log.Warnf("save eval attempt %d: %v", r.ID, dbErr)
+			}
+			if data.IsRateLimited(err) {
+				return scored // CoinGecko is cooling down: try again next run
+			}
 			continue
 		}
 		now := time.Now().UTC()
 		// Select by field name so zero values (e.g. correct=false) are written too.
-		db.DB.Model(&models.AnalysisRecord{ID: r.ID}).
-			Select("EvaluatedAt", "PriceAfter24h", "ReturnPct", "Correct").
-			Updates(models.AnalysisRecord{EvaluatedAt: &now, PriceAfter24h: price, ReturnPct: ret, Correct: &ok})
+		if dbErr := db.DB.Model(&models.AnalysisRecord{ID: r.ID}).
+			Select("EvaluatedAt", "PriceAfter24h", "ReturnPct", "Correct", "EvalAttempts", "EvalError").
+			Updates(models.AnalysisRecord{EvaluatedAt: &now, PriceAfter24h: price, ReturnPct: ret, Correct: &ok, EvalAttempts: r.EvalAttempts + 1}).Error; dbErr != nil {
+			logger.Log.Warnf("save evaluation %d: %v", r.ID, dbErr)
+			continue
+		}
+		scored++
 	}
+	return scored
 }
 
-// History returns the most recent analyses, newest first.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// History returns the most recent analyses, newest first. Agent steps are
+// left out: with tool results they can be ~10 KB per record, and the history
+// table doesn't show them.
 func History(limit int) []models.AnalysisRecord {
 	var recs []models.AnalysisRecord
-	db.DB.Order("created_at desc").Limit(limit).Find(&recs)
-	for i := range recs {
-		_ = json.Unmarshal([]byte(recs[i].StepsJSON), &recs[i].Steps)
-	}
+	db.DB.Omit("steps_json").Order("created_at desc").Limit(limit).Find(&recs)
 	return recs
 }
 
 // Stats aggregates the track record over all stored analyses.
 func Stats() models.EvalStats {
 	var recs []models.AnalysisRecord
-	db.DB.Select("direction", "confidence", "correct").Find(&recs)
+	db.DB.Select("direction", "confidence", "correct", "evaluated_at").Find(&recs)
 	return core.ComputeStats(recs)
 }

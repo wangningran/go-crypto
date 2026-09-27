@@ -15,7 +15,10 @@
     <n-grid :cols="4" :x-gap="16" style="margin-bottom:24px" v-if="stats">
       <n-grid-item><n-statistic label="Direction accuracy" :value="stats.evaluated ? pct(stats.accuracy) : '—'" /></n-grid-item>
       <n-grid-item><n-statistic label="Scored" :value="stats.evaluated" /></n-grid-item>
-      <n-grid-item><n-statistic label="Waiting for 24h" :value="stats.pending" /></n-grid-item>
+      <n-grid-item>
+        <n-statistic label="Waiting for 24h" :value="stats.pending" />
+        <div v-if="stats.unscorable" style="color:#888;font-size:12px">+ {{ stats.unscorable }} unscorable (price unavailable)</div>
+      </n-grid-item>
       <n-grid-item>
         <n-statistic label="Avg confidence: right / wrong"
           :value="stats.evaluated ? pct(stats.avgConfidenceCorrect) + ' / ' + pct(stats.avgConfidenceWrong) : '—'" />
@@ -45,6 +48,7 @@ const loading = ref(false)
 const evaluating = ref(false)
 
 const pct = (x: number) => Math.round(x * 100) + '%'
+const scored = (r: models.AnalysisRecord) => r.correct !== undefined && r.correct !== null
 
 const dirColumns: DataTableColumns<models.DirectionStats> = [
   { title: 'Call', key: 'direction' },
@@ -63,12 +67,14 @@ const columns: DataTableColumns<models.AnalysisRecord> = [
   },
   { title: 'Conf.', key: 'confidence', render: (r) => pct(r.confidence) },
   { title: 'Price then', key: 'priceAtAnalysis', render: (r) => formatPrice(r.priceAtAnalysis, r.currency) },
-  { title: 'Price +24h', key: 'priceAfter24h', render: (r) => (r.evaluatedAt ? formatPrice(r.priceAfter24h, r.currency) : '—') },
-  { title: 'Move', key: 'returnPct', render: (r) => (r.evaluatedAt ? h('span', { style: `color:${changeColor(r.returnPct)}` }, formatPct(r.returnPct)) : '—') },
+  { title: 'Price +24h', key: 'priceAfter24h', render: (r) => (scored(r) ? formatPrice(r.priceAfter24h, r.currency) : '—') },
+  { title: 'Move', key: 'returnPct', render: (r) => (scored(r) ? h('span', { style: `color:${changeColor(r.returnPct)}` }, formatPct(r.returnPct)) : '—') },
   {
     title: 'Result', key: 'correct',
     render: (r) => r.correct === undefined || r.correct === null
-      ? h('span', { style: 'color:#888' }, 'pending')
+      ? (r.evaluatedAt
+        ? h('span', { style: 'color:#888', title: r.evalError }, 'unscorable')
+        : h('span', { style: 'color:#888', title: r.evalError || '' }, r.evalAttempts ? `pending (retry ${r.evalAttempts})` : 'pending'))
       : h(NTag, { size: 'small', type: r.correct ? 'success' : 'error' }, { default: () => (r.correct ? '✓ right' : '✗ wrong') }),
   },
   { title: 'Model', key: 'model', render: (r) => h('small', { style: 'color:#888' }, r.model) },
