@@ -110,9 +110,14 @@ func (s *Service) Analyze(ctx context.Context, coinID string, onStep func(models
 		return nil, errors.New("please add your LLM API key in Settings to enable AI analysis")
 	}
 
+	// levels is filled in by the get_price_history tool (if the model calls
+	// it, which the system prompt requires) with the real computed
+	// support/resistance candidates for this coin, so the submitted analysis
+	// can be snapped to one of them instead of trusting a free-form number.
+	var levels indicators.Snapshot
 	runner := &agent.Runner{
 		Client:    &agent.Client{BaseURL: settings.OpenAIBase, APIKey: key, Model: settings.OpenAIModel},
-		Tools:     s.tools(cp, cur),
+		Tools:     s.tools(cp, cur, &levels),
 		FinalTool: agent.Tool{Name: "submit_analysis", Description: "Submit the final 24h analysis. Call exactly once, at the end.", Parameters: core.SubmissionSchema()},
 		MaxSteps:  6,
 		OnStep: func(st agent.Step) {
@@ -129,7 +134,7 @@ func (s *Service) Analyze(ctx context.Context, coinID string, onStep func(models
 	if err != nil {
 		return nil, err
 	}
-	sub, err := core.ParseSubmission(res.Final)
+	sub, err := core.ParseSubmission(res.Final, levels.SupportLevels, levels.ResistanceLevels)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +201,11 @@ func toModelStep(st agent.Step) models.AgentStep {
 }
 
 // tools the agent may call. Numbers are computed here, in code; the model only interprets them.
-func (s *Service) tools(cp models.CachedPrice, cur string) []agent.Tool {
+// tools returns the agent's tools for one analysis run. levelsOut is filled
+// in by get_price_history's Run func with the computed indicator snapshot
+// (including support/resistance candidates), so the caller can read it back
+// after the agent loop finishes and use it to validate the final submission.
+func (s *Service) tools(cp models.CachedPrice, cur string, levelsOut *indicators.Snapshot) []agent.Tool {
 	noArgs := map[string]any{"type": "object", "properties": map[string]any{}}
 	return []agent.Tool{
 		{
@@ -215,7 +224,7 @@ func (s *Service) tools(cp models.CachedPrice, cur string) []agent.Tool {
 		},
 		{
 			Name:        "get_price_history",
-			Description: "Technical indicators computed from daily closes: 7d/30d % change, SMA7, SMA30, RSI14, daily volatility, 30-day high/low, rule-based trend, and the last 10 daily closes.",
+			Description: "Technical indicators computed from daily closes: 7d/30d % change, SMA7, SMA30, RSI14, daily volatility, 30-day high/low, rule-based trend, support/resistance candidates, and the last 10 daily closes.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -240,9 +249,13 @@ func (s *Service) tools(cp models.CachedPrice, cur string) []agent.Tool {
 				if len(recent) > 10 {
 					recent = recent[len(recent)-10:]
 				}
+				snap := indicators.Summarize(daily)
+				if levelsOut != nil {
+					*levelsOut = snap
+				}
 				return map[string]any{
 					"currency":        cur,
-					"indicators":      indicators.Summarize(daily),
+					"indicators":      snap,
 					"lastDailyCloses": recent,
 				}, nil
 			},

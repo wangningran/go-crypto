@@ -79,3 +79,53 @@ func TestSummarizeTrend(t *testing.T) {
 		t.Fatalf("short series should have unknown trend and no SMA30: %+v", short)
 	}
 }
+
+func TestSupportResistance(t *testing.T) {
+	// A price that bounces between ~100 (touched 3x) and ~120 (touched 2x),
+	// currently sitting in the middle at 110.
+	daily := []float64{
+		110, 105, 100, 106, 112, 119, 113, 101, 108, 118, 120, 111, 110,
+	}
+	sup, res := SupportResistance(daily, 110)
+	if len(sup) == 0 || len(res) == 0 {
+		t.Fatalf("expected both support and resistance, got sup=%v res=%v", sup, res)
+	}
+	if !near(sup[0], 100.33, 1) { // clustered swing lows around 100-101
+		t.Fatalf("support[0] = %v, want ~100", sup[0])
+	}
+	if !near(res[0], 119.33, 1) { // clustered swing highs around 119-120
+		t.Fatalf("resistance[0] = %v, want ~119-120", res[0])
+	}
+	for _, s := range sup {
+		if s >= 110 {
+			t.Fatalf("support level %v should be below current price 110", s)
+		}
+	}
+	for _, r := range res {
+		if r <= 110 {
+			t.Fatalf("resistance level %v should be above current price 110", r)
+		}
+	}
+
+	if sup, res := SupportResistance([]float64{1, 2, 3}, 2); sup != nil || res != nil {
+		t.Fatalf("too little data should return no levels, got sup=%v res=%v", sup, res)
+	}
+
+	// Nearby swing points should merge into one level instead of flooding
+	// the candidate list with near-duplicates.
+	flatTop := []float64{90, 100.1, 90, 99.9, 90, 100.2, 90, 100.0, 90}
+	_, res2 := SupportResistance(flatTop, 95)
+	if len(res2) != 1 {
+		t.Fatalf("near-duplicate swing highs should cluster into 1 level, got %v", res2)
+	}
+}
+
+func TestSummarizeIncludesLevels(t *testing.T) {
+	daily := []float64{
+		110, 105, 100, 106, 112, 119, 113, 101, 108, 118, 120, 111, 110,
+	}
+	s := Summarize(daily)
+	if len(s.SupportLevels) == 0 || len(s.ResistanceLevels) == 0 {
+		t.Fatalf("Summarize should populate levels: %+v", s)
+	}
+}

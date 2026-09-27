@@ -10,7 +10,7 @@ import (
 )
 
 func TestParseSubmission(t *testing.T) {
-	s, err := ParseSubmission(json.RawMessage(`{"direction":" Up ","confidence":72,"support":120,"resistance":100,"summary":" ok "}`))
+	s, err := ParseSubmission(json.RawMessage(`{"direction":" Up ","confidence":72,"support":120,"resistance":100,"summary":" ok "}`), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,9 +23,33 @@ func TestParseSubmission(t *testing.T) {
 		`{"direction":"neutral","confidence":0.5,"summary":""}`,
 		`{"direction":"neutral","confidence":0.5,"support":-1,"summary":"x"}`,
 	} {
-		if _, err := ParseSubmission(json.RawMessage(bad)); err == nil {
+		if _, err := ParseSubmission(json.RawMessage(bad), nil, nil); err == nil {
 			t.Errorf("expected error for %s", bad)
 		}
+	}
+}
+
+func TestParseSubmissionSnapsLevelsToCandidates(t *testing.T) {
+	// The model invents 95 and 130 instead of using the real computed levels.
+	raw := json.RawMessage(`{"direction":"bullish","confidence":0.6,"support":95,"resistance":130,"summary":"x"}`)
+	s, err := ParseSubmission(raw, []float64{90.5, 80}, []float64{125, 140})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Support != 90.5 {
+		t.Fatalf("support should snap to nearest candidate 90.5, got %v", s.Support)
+	}
+	if s.Resistance != 125 {
+		t.Fatalf("resistance should snap to nearest candidate 125, got %v", s.Resistance)
+	}
+
+	// No candidates (not enough history) -> value passes through unchanged.
+	s2, err := ParseSubmission(json.RawMessage(`{"direction":"neutral","confidence":0.5,"support":95,"resistance":130,"summary":"x"}`), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.Support != 95 || s2.Resistance != 130 {
+		t.Fatalf("without candidates, levels should pass through unchanged: %+v", s2)
 	}
 }
 

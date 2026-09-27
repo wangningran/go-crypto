@@ -146,6 +146,12 @@ type Snapshot struct {
 	// Trend is a rule-based label: "up" if price > SMA7 > SMA30,
 	// "down" if price < SMA7 < SMA30, otherwise "sideways".
 	Trend string `json:"trend"`
+	// SupportLevels / ResistanceLevels are computed price levels, nearest to
+	// Last first (see SupportResistance). The model must pick from these
+	// rather than invent a number — ParseSubmission snaps to the nearest
+	// candidate if it doesn't.
+	SupportLevels    []float64 `json:"supportLevels,omitempty"`
+	ResistanceLevels []float64 `json:"resistanceLevels,omitempty"`
 }
 
 func ptr(x float64, ok bool) *float64 {
@@ -187,5 +193,111 @@ func Summarize(daily []float64) Snapshot {
 			s.Trend = "sideways"
 		}
 	}
+	s.SupportLevels, s.ResistanceLevels = SupportResistance(daily, s.Last)
 	return s
+}
+
+// levelClusterTolPct: swing points within this % of each other are treated as
+// the same level (price rarely reverses at the exact same cent twice).
+const levelClusterTolPct = 0.015
+
+// maxLevels caps how many support/resistance candidates are returned.
+const maxLevels = 3
+
+// SupportResistance finds candidate support and resistance levels from daily
+// closes: it locates swing highs/lows (points that are a local extreme within
+// a small window), clusters nearby ones together (weighting by how many times
+// price turned near that level), and returns the levels closest to current,
+// split into support (below current) and resistance (above current).
+//
+// This exists so the AI agent picks support/resistance from real turning
+// points in the data instead of inventing plausible-looking numbers: a level
+// with no basis in the price history is exactly the kind of unverifiable
+// claim the rest of this package (SMA, RSI, volatility) was written to avoid.
+func SupportResistance(daily []float64, current float64) (supports, resistances []float64) {
+	const window = 2 // a swing point must be the extreme among its window neighbors on each side
+	if len(daily) < 2*window+1 {
+		return nil, nil
+	}
+
+	var swings []float64
+	for i := window; i < len(daily)-window; i++ {
+		isLow, isHigh := true, true
+		for k := i - window; k <= i+window; k++ {
+			if k == i {
+				continue
+			}
+			if daily[k] < daily[i] {
+				isLow = false
+			}
+			if daily[k] > daily[i] {
+				isHigh = false
+			}
+		}
+		if isLow || isHigh {
+			swings = append(swings, daily[i])
+		}
+	}
+	if len(swings) == 0 {
+		return nil, nil
+	}
+
+	for _, lv := range clusterLevels(swings) {
+		switch {
+		case lv < current:
+			supports = append(supports, lv)
+		case lv > current:
+			resistances = append(resistances, lv)
+		}
+	}
+	// Nearest to current price first.
+	sort.Sort(sort.Reverse(sort.Float64Slice(supports)))
+	sort.Float64s(resistances)
+	return round2All(topN(supports, maxLevels)), round2All(topN(resistances, maxLevels))
+}
+
+// clusterLevels merges swing points within levelClusterTolPct of each other,
+// replacing each group with its (touch-weighted) average, ranked by touches.
+func clusterLevels(levels []float64) []float64 {
+	sorted := append([]float64{}, levels...)
+	sort.Float64s(sorted)
+
+	type cluster struct {
+		avg     float64
+		touches int
+	}
+	var clusters []cluster
+	for _, lv := range sorted {
+		if n := len(clusters); n > 0 {
+			last := &clusters[n-1]
+			if last.avg != 0 && math.Abs(lv-last.avg)/math.Abs(last.avg) <= levelClusterTolPct {
+				last.avg = (last.avg*float64(last.touches) + lv) / float64(last.touches+1)
+				last.touches++
+				continue
+			}
+		}
+		clusters = append(clusters, cluster{avg: lv, touches: 1})
+	}
+	sort.SliceStable(clusters, func(i, j int) bool { return clusters[i].touches > clusters[j].touches })
+
+	out := make([]float64, len(clusters))
+	for i, c := range clusters {
+		out[i] = c.avg
+	}
+	return out
+}
+
+func topN(v []float64, n int) []float64 {
+	if len(v) > n {
+		return v[:n]
+	}
+	return v
+}
+
+func round2All(v []float64) []float64 {
+	out := make([]float64, len(v))
+	for i, x := range v {
+		out[i] = math.Round(x*100) / 100
+	}
+	return out
 }

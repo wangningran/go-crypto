@@ -35,7 +35,7 @@ flowchart LR
     U[Click 🤖 AI] --> C{Analyzed in the<br/>last 5 min?}
     C -- yes --> R[Return cached result]
     C -- no --> L[Agent loop]
-    L -->|tool call| T1[get_price_history<br/>SMA, RSI, volatility,<br/>30-day range]
+    L -->|tool call| T1[get_price_history<br/>SMA, RSI, volatility,<br/>support/resistance levels]
     L -->|tool call| T2[get_market_overview]
     L -->|tool call| T3[get_news]
     L -->|tool call| T4[get_price_snapshot]
@@ -56,6 +56,7 @@ The agent loop (`backend/agent`) is written from scratch on the chat completions
 ### Design decisions
 
 - **Code computes, the model interprets.** Moving averages, RSI and volatility are computed in Go (`backend/indicators`, unit-tested) from CoinGecko history. The prompt forbids numbers that did not come from a tool. The first version sent six 24h numbers and asked for "trend and key levels", and the model had to guess.
+- **Support/resistance are computed too, not just requested.** An earlier version only told the model, in the prompt, to base support/resistance on the 30-day range — nothing stopped it from answering with a plausible-looking invented number, since the tool result never actually contained "support" or "resistance" fields. `indicators.SupportResistance` now finds real swing highs/lows in the daily closes, clusters nearby ones, and ranks them by how many times price turned near that level; `get_price_history` returns the nearest few as `supportLevels`/`resistanceLevels`, and `ParseSubmission` snaps whatever the model submits to the nearest candidate. The instruction alone wasn't a guarantee; the tool result and the validation step are what make it one.
 - **Structured output through a tool.** `submit_analysis` has a JSON Schema. The output is validated in `backend/analysis/core`: the direction enum is normalized, confidence is clamped to 0–1 (a 0–100 answer is converted), and support/resistance are swapped if reversed.
 - **Every call is scored.** Every 30 minutes a job checks analyses older than 24h against the price at +24h. If the analysis-time price is more than 5 minutes old, it is re-fetched first, because it is the baseline. Records whose +24h price can't be fetched are retried, and after 6 attempts marked "unscorable", so they never block newer records. The scoring rules:
   - bullish is right if the price rose

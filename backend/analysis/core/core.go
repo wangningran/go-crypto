@@ -20,7 +20,10 @@ const SystemPrompt = `You are a careful crypto market analyst working inside a d
 You have tools that return real data. Rules:
 - Always call get_price_history before forming a view. Use get_market_overview and get_news when they help.
 - Every number you mention must come from a tool result. Never invent prices, levels or news.
-- Support and resistance must be based on the returned 30-day range, moving averages or recent prices.
+- get_price_history returns supportLevels and resistanceLevels: real swing highs/lows found in the
+  price data, nearest to the current price first. Your support and resistance MUST be chosen from
+  those lists, not estimated or rounded. If a list is empty (not enough history), say so in the
+  summary instead of guessing a number.
 - Make a call for the NEXT 24 HOURS: bullish, bearish or neutral (expected move within ±1%).
 - Confidence is 0 to 1. Use lower confidence when signals conflict or data is missing.
 - Finish by calling submit_analysis. The summary is 120-250 words of plain text in English, structured as:
@@ -49,8 +52,8 @@ func SubmissionSchema() map[string]any {
 		"properties": map[string]any{
 			"direction":  map[string]any{"type": "string", "enum": []string{"bullish", "bearish", "neutral"}, "description": "Expected direction over the next 24 hours"},
 			"confidence": map[string]any{"type": "number", "minimum": 0, "maximum": 1},
-			"support":    map[string]any{"type": "number", "description": "Nearest support level, in the quote currency"},
-			"resistance": map[string]any{"type": "number", "description": "Nearest resistance level, in the quote currency"},
+			"support":    map[string]any{"type": "number", "description": "Nearest support level, in the quote currency. Must be one of the values in get_price_history's supportLevels, not an estimate."},
+			"resistance": map[string]any{"type": "number", "description": "Nearest resistance level, in the quote currency. Must be one of the values in get_price_history's resistanceLevels, not an estimate."},
 			"summary":    map[string]any{"type": "string", "description": "120-250 word analysis"},
 		},
 		"required": []string{"direction", "confidence", "support", "resistance", "summary"},
@@ -58,7 +61,17 @@ func SubmissionSchema() map[string]any {
 }
 
 // ParseSubmission validates and normalizes the model's output.
-func ParseSubmission(raw json.RawMessage) (Submission, error) {
+//
+// supportCandidates and resistanceCandidates are the real swing levels
+// computed by indicators.SupportResistance for this analysis (see
+// get_price_history). The prompt tells the model to choose from them, but
+// nothing stops it from answering with an invented number instead — so the
+// submitted level is always replaced with the nearest candidate. This is
+// what actually enforces "support and resistance are computed, not
+// guessed": the prompt instruction alone is not a guarantee. Pass nil for
+// either slice to skip that check (e.g. too little price history to compute
+// levels).
+func ParseSubmission(raw json.RawMessage, supportCandidates, resistanceCandidates []float64) (Submission, error) {
 	var s Submission
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return s, fmt.Errorf("invalid analysis JSON: %w", err)
@@ -84,11 +97,30 @@ func ParseSubmission(raw json.RawMessage) (Submission, error) {
 	if s.Support > 0 && s.Resistance > 0 && s.Support > s.Resistance {
 		s.Support, s.Resistance = s.Resistance, s.Support
 	}
+	s.Support = snapToCandidate(s.Support, supportCandidates)
+	s.Resistance = snapToCandidate(s.Resistance, resistanceCandidates)
 	s.Summary = strings.TrimSpace(s.Summary)
 	if s.Summary == "" {
 		return s, errors.New("empty summary")
 	}
 	return s, nil
+}
+
+// snapToCandidate replaces v with the nearest value in candidates, unless v
+// is already within levelSnapTolPct of one (in which case that candidate is
+// still used, for a canonical value). v is returned unchanged if candidates
+// is empty or v is 0 (model gave no level).
+func snapToCandidate(v float64, candidates []float64) float64 {
+	if v <= 0 || len(candidates) == 0 {
+		return v
+	}
+	best, bestDist := candidates[0], math.Abs(v-candidates[0])
+	for _, c := range candidates[1:] {
+		if d := math.Abs(v - c); d < bestDist {
+			best, bestDist = c, d
+		}
+	}
+	return best
 }
 
 // Judge scores a direction call given the price at analysis time and 24h later.
